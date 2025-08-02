@@ -1,13 +1,40 @@
+import React, { useEffect, useState, useRef } from 'react';
+import { Button, StyleSheet, Text, TouchableOpacity, View, Dimensions } from 'react-native';
 import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
-import { useState } from 'react';
-import { Button, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { bundleResourceIO, cameraWithTensors } from '@tensorflow/tfjs-react-native';
+import * as tf from '@tensorflow/tfjs';
+import DetectionOverlay from './components/DetectionOverlay';
+
+
+const TensorCamera = cameraWithTensors(CameraView);
+const { width: DEVICE_WIDTH, height: DEVICE_HEIGHT } = Dimensions.get('window');
 
 export default function App() {
   const [facing, setFacing] = useState<CameraType>('back');
   const [permission, requestPermission] = useCameraPermissions();
   const [isCameraOpen, setIsCameraOpen] = useState(false);
 
+  const [model, setModel] = useState<any>(null);
+  const [detections, setDetections] = useState<any[]>([]);
+  const rafId = useRef<number | null>(null);
 
+  useEffect(() => {
+    (async () => {
+      await tf.ready();
+      const loadedModel = await tf.loadGraphModel(bundleResourceIO(
+        require('./assets/model/yolov8_tfjs_model/model.json'),
+        [
+          require('./assets/model/yolov8_tfjs_model/group1-shard1of4.bin'),
+          require('./assets/model/yolov8_tfjs_model/group1-shard2of4.bin'),
+          require('./assets/model/yolov8_tfjs_model/group1-shard3of4.bin'),
+          require('./assets/model/yolov8_tfjs_model/group1-shard4of4.bin')
+        ]
+      ));
+      setModel(loadedModel);
+      console.log('YOLO model loaded');
+
+    })();
+  }, []);
 
   if (!permission) {
     // Camera permissions are still loading
@@ -28,6 +55,42 @@ export default function App() {
     setFacing((current) => (current === 'back' ? 'front' : 'back'));
   }
 
+  // Convert YOLO output to detection boxes
+  const parsePredictions = (predictions: any) => {
+    const boxes: any[] = [];
+
+    // Example assumes output shape: [num, 6] => [x, y, w, h, conf, class]
+    const data = predictions.arraySync();
+    data.forEach((row: number[]) => {
+      const [x, y, w, h, conf, cls] = row;
+      if (conf > 0.5) {
+        boxes.push({
+          x: x - w / 2,
+          y: y - h / 2,
+          width: w,
+          height: h,
+          label: `Class ${cls}`,
+          confidence: conf
+        });
+      }
+    });
+    return boxes;
+  };
+
+  const handleCameraStream = (images: any) => {
+    const loop = async () => {
+      const nextImageTensor = images.next().value;
+      if (model && nextImageTensor) {
+        const predictionTensor = await model.executeAsync(nextImageTensor);
+        const parsed = parsePredictions(predictionTensor);
+        setDetections(parsed);
+        tf.dispose([nextImageTensor, predictionTensor]);
+      }
+      rafId.current = requestAnimationFrame(loop);
+    };
+    loop();
+  };
+
   const renderMainScreen = () => (
     <View style={styles.container}>
       <Text style={styles.message}>Welcome</Text>
@@ -39,7 +102,19 @@ export default function App() {
 
 
   const renderCameraScreen = () => (
-    <CameraView style={styles.camera} facing={facing}>
+    <View style={{ flex: 1 }}>
+      <TensorCamera
+        style={styles.camera}
+        facing={facing}
+        onReady={handleCameraStream}
+        autorender={true}
+        resizeWidth={320} // Match YOLO export img size
+        resizeHeight={320}
+        resizeDepth={3}
+        cameraTextureWidth={DEVICE_WIDTH}
+        cameraTextureHeight={DEVICE_HEIGHT} useCustomShadersToResize={true} />
+
+      <DetectionOverlay detections={detections} width={DEVICE_WIDTH} height={DEVICE_HEIGHT} />
       <View style={styles.cameraControls}>
         <TouchableOpacity style={styles.controlButton} onPress={toggleCameraFacing}>
           <Text style={styles.buttonText}>Flip Camera</Text>
@@ -48,7 +123,7 @@ export default function App() {
           <Text style={styles.buttonText}>Close</Text>
         </TouchableOpacity>
       </View>
-    </CameraView>
+    </View>
   );
 
   return isCameraOpen ? renderCameraScreen() : renderMainScreen();
@@ -60,12 +135,13 @@ const styles = StyleSheet.create({
   buttonText: { color: 'white', fontSize: 16 },
   camera: { flex: 1, width: '100%' },
   cameraControls: {
-    flex: 1,
     flexDirection: 'row',
     justifyContent: 'space-around',
-    alignItems: 'flex-end',
     paddingBottom: 30,
     backgroundColor: 'transparent',
+    position: 'absolute',
+    bottom: 0,
+    width: '100%',
   },
   controlButton: { backgroundColor: 'rgba(0,0,0,0.6)', padding: 10, borderRadius: 5 },
 });
