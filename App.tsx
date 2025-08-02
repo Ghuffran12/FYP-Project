@@ -78,16 +78,30 @@ export default function App() {
   };
 
   const handleCameraStream = (images: any) => {
+    let frameCount = 0;
+
     const loop = async () => {
       const nextImageTensor = images.next().value;
-      if (model && nextImageTensor) {
-        const predictionTensor = await model.executeAsync(nextImageTensor);
-        const parsed = parsePredictions(predictionTensor);
-        setDetections(parsed);
-        tf.dispose([nextImageTensor, predictionTensor]);
+      if (model && nextImageTensor && frameCount % 2 === 0) { // process every 2nd frame
+        try {
+          const resized = tf.image.resizeBilinear(nextImageTensor, [320, 320]);
+          const normalized = resized.div(255.0).expandDims(0); // [1, 320, 320, 3]
+
+          const predictionTensor = await model.executeAsync(normalized);
+          const parsed = parsePredictions(predictionTensor);
+
+          setDetections(parsed);
+
+          tf.dispose([nextImageTensor, resized, normalized, predictionTensor]);
+        } catch (err) {
+          console.error("YOLO inference error:", err);
+        }
       }
+
+      frameCount++;
       rafId.current = requestAnimationFrame(loop);
     };
+
     loop();
   };
 
@@ -112,7 +126,8 @@ export default function App() {
         resizeHeight={320}
         resizeDepth={3}
         cameraTextureWidth={DEVICE_WIDTH}
-        cameraTextureHeight={DEVICE_HEIGHT} useCustomShadersToResize={true} />
+        cameraTextureHeight={DEVICE_HEIGHT}
+        useCustomShadersToResize={true} />
 
       <DetectionOverlay detections={detections} width={DEVICE_WIDTH} height={DEVICE_HEIGHT} />
       <View style={styles.cameraControls}>
